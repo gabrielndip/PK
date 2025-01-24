@@ -1,0 +1,331 @@
+---
+title: "Reproduction of Tutorial: Statistical analysis and reporting of clinical pharmacokinetic studies"
+author: "GT"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+## Libraries
+
+```{r}
+library(readxl)
+library(reshape2)
+library(tidyverse)  
+library(ncappc)
+library(Publish) 
+library(ggpubr) 
+library(ggthemes)  
+library(RColorBrewer)  
+library(tmaptools)  
+library(skimr)
+library(styler)
+library(pwr)
+
+```
+
+
+## Load Raw Data
+
+```{r}
+rawpk <- readxl::read_xlsx("Tutorial- Statistical analysis and reporting of clinical pharmacokinetic studies Table S1.xlsx")
+head(rawpk)
+skim(rawpk)
+```
+
+
+## Section I: Plotting a plasma concentration-time curve for Figure 2
+```{r}
+# Generate a new dataset with columns for mean concentration and standard deviation (SD).
+ctdata <- rawpk %>% 
+  group_by(TAD, IND) %>%
+  dplyr::summarise(
+    mean_conc = mean(DV, na.rm = TRUE), 
+    SD_conc = sd(DV, na.rm = TRUE)
+    )
+ctdata %>% print(n = 10^4)
+
+# Recode IND from numeric to character.
+ctdata <- ctdata %>% 
+  dplyr::mutate(IND = dplyr::recode(IND, "0" = "No inducer", "1" = "Inducer"))
+ctdata %>% print(n = 10^4)
+
+# Plotting a simple graph of mean midazolam plasma concentration and time.
+ggplot() + 
+  geom_point(data = ctdata, aes(x=TAD, y=mean_conc, group=IND))
+
+# Plotting mean midazolam plasma concentration (and standard deviation (SD)) and time.
+ctdata %>% 
+  ggplot() +
+  geom_point(aes(x=TAD, y=mean_conc, group=IND, color=IND)) +
+  geom_line(aes(x=TAD, y=mean_conc, group=IND, color=IND)) +
+  geom_errorbar(
+    aes(
+      x=TAD, y = mean_conc, 
+      ymax = mean_conc + SD_conc, ymin = mean_conc - SD_conc, 
+      color=IND
+    ),
+    position = position_dodge(width=0.22)
+    ) +
+    labs(
+      x ="Time after dose (h)", 
+      y = "Concentration (ng/ml)", 
+      title ="Mean midazolam plasma concentrations", 
+      color = ""
+    ) +
+    theme_classic()
+
+# Create y-log scale graph for inset in the main graph.
+log_plot <- ggplot(data = ctdata, aes(x = TAD, y = mean_conc, group = IND)) +
+  geom_point(aes(color = IND, shape = IND)) +
+  geom_line(aes(linetype = IND, color = IND)) +
+  labs(x = "Time after dose (h)", y = "Concentration\n (ng/ml)") +
+  scale_color_brewer(palette = "Set2") +
+  theme_clean() +
+  theme(plot.title = element_text(hjust = 2), legend.position = "none", 
+        text=element_text(size=12)) +
+  scale_x_continuous(limits=c(0, 12), breaks=c(0, 4, 8, 12)) +
+  scale_y_log10() +
+  theme(text=element_text(family="Times"))
+
+# Combine the main graph and the y-log scale graph in one graph. 
+ggplot(data = ctdata, aes(x = TAD, y = mean_conc, group = IND)) +
+  geom_point(aes(color = IND, shape = IND)) +
+  geom_line(aes(linetype = IND, color = IND)) +
+  geom_errorbar(aes(ymax = mean_conc + SD_conc, ymin = mean_conc - SD_conc, color = IND), 
+  position=position_dodge(width = .22)) +
+  labs(
+    x = "Time after dose (h)", 
+    y = "Concentration (ng/ml)", 
+    title = "Mean midazolam plasma concentration", 
+    shape = "Induction", color = "Induction", linetype = "Induction"
+  ) +
+  scale_color_brewer(palette = "Set2") +
+  theme_clean() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    legend.position = "bottom", 
+    legend.title = element_blank(), 
+    legend.text=element_text(family="Times"), 
+    axis.text=element_text(size=12), 
+    axis.title=element_text(size=14),
+    text=element_text(family="Times")
+  ) +
+  annotation_custom(
+    ggplotGrob(log_plot), 
+    xmin = 6.5, xmax = 12.8, 
+    ymin = 0.6, ymax = 1.45
+  )
+```
+
+
+## Section II: Non-compartmental pharmacokinetic analysis
+
+```{r}
+# Compute the non-compartmental pharmacokinetic analysis.
+ncappc(
+  obsFile = rawpk,
+  str1Nm = "IND",
+  str1 = c(0,1),
+  concUnit = "ng/ml",
+  timeUnit = "hours",
+  doseUnit = "ng",
+  idNmObs = "ID",
+  timeNmObs = "TAD",
+  concNmObs = "DV",
+  doseAmtNm = "DOSE",
+  onlyNCA = TRUE,
+  LambdaTimeRange = "NULL",
+  method = "linearup-logdown",
+  studyName = "PK Tutorial",
+  outFileNm = "WOW_PK_TUTORIAL",
+  extrapolate = TRUE,
+  gg_theme = theme_classic()
+)
+
+# Create dataframe containing only (Cmax, AUClast, HL_lambda_z (terminal half-life), Cl_obs).
+pk_analysis <- ncaOutput %>%
+  select(ID, IND, Tmax, Cmax, Cl_obs, HL_Lambda_z, AUClast)
+
+# Change the unit of Cl_obs from ml/h to l/h, to increase readability of the coming Table 2. 
+pk_analysis <- pk_analysis %>% 
+  mutate(Cl_obs = Cl_obs/1000)
+```
+
+## Section III: Descriptive stats for Table 2 (NCP analysis stratified by DDI)
+
+```{r}
+# Reshape data from long format to wide format.
+pk_analysis_wide <- pk_analysis  %>%
+  pivot_longer(
+    cols = !c(ID, IND),  # Columns to pivot (all except ID and IND)
+  )  %>% 
+  pivot_wider(
+    names_from = c(name, IND),  # Combine `variable` and `IND` to form new column names
+    values_from = value            # Fill these new columns with the `value` column
+  )
+
+# Add a new column with ratio.
+pk_analysis_wide <- pk_analysis_wide %>%
+  mutate(
+    Cmax_ratio = Cmax_1 / Cmax_0,
+    Cl_obs_ratio = Cl_obs_1 / Cl_obs_0,
+    HL_Lambda_z_ratio = HL_Lambda_z_1 / HL_Lambda_z_0,
+    AUClast_ratio = AUClast_1 / AUClast_0
+  )
+
+# Define the function for calculating geometric mean ratio and 95% CI.
+geo <- function(x) {
+  aggr <- ci.mean(x, statistic = "geometric")
+  paste0(
+    round(aggr$geomean, 2), " (", 
+    round(aggr$lower, 2), "-", 
+    round(aggr$upper, 2), ")"
+  )
+}
+
+# Define the function for calculating median.
+medians <- function(x) {
+  med <- median(x)
+  iqr_low <- quantile(x, 0.25)
+  iqr_up <- quantile(x, 0.75)
+  paste0(round(med, 2), " (", round(iqr_low, 2), "-", round(iqr_up, 2), ")")
+}
+
+# Calculate geometric mean and 95% CI for the individual parameters.
+Cmax_GMR <- geo(pk_analysis_wide$Cmax_ratio)
+Cl_GMR <- geo(pk_analysis_wide$Cl_obs_ratio)
+HL_GMR <- geo(pk_analysis_wide$HL_Lambda_z_ratio)
+AUC_GMR <- geo(pk_analysis_wide$AUClast_ratio)
+Tmax_GMR <- "NA"
+
+# Assemble results in one column for Table 2.
+results_GMR <- rbind(AUC_GMR, Cmax_GMR, HL_GMR, Cl_GMR, Tmax_GMR)
+
+# Calculate median for the individual parameters with and without inducer.
+Cmax_0_M <- medians(pk_analysis_wide$Cmax_0)
+Cmax_1_M <- medians(pk_analysis_wide$Cmax_1)
+Cl_0_M <- medians(pk_analysis_wide$Cl_obs_0)
+Cl_1_M <- medians(pk_analysis_wide$Cl_obs_1)
+HL_0_M <- medians(pk_analysis_wide$HL_Lambda_z_0)
+HL_1_M <- medians(pk_analysis_wide$HL_Lambda_z_1)
+AUC_0_M <- medians(pk_analysis_wide$AUClast_0)
+AUC_1_M <- medians(pk_analysis_wide$AUClast_1)
+Tmax_0_M <- medians(pk_analysis_wide$Tmax_0)
+Tmax_1_M <- medians(pk_analysis_wide$Tmax_1)
+
+# Assemble results in two columns (with and without induction) for Table 2.
+results_IND <- rbind(AUC_1_M, Cmax_1_M, HL_1_M, Cl_1_M, Tmax_1_M)
+results_noIND <- rbind(AUC_0_M, Cmax_0_M, HL_0_M, Cl_0_M, Tmax_0_M)
+
+# Assemble Table 2
+Table2 <- matrix(nrow=5, ncol=0)
+Table2 <- cbind(results_noIND, results_IND, results_GMR, Table2)
+colnames1 <- c("WITHOUT INDUCER (Median (IQR))", "WITH INDUCER (Median (IQR))", "GMR (95% CI)")
+Table2 <- rbind(colnames1, Table2)
+
+rownames1 <- c("DRUG", "Midazolam", "", "", "", "")
+rownames2 <- c("PARAMETER", "AUC 0-last (ng*h ml^-1)", "Cmax (ng ml^-1)", "T1/2 (h)", "CL/F (L h^-1)", "Tmax (h)")
+Table2 <- cbind(rownames1, rownames2, Table2)
+
+# Test Tmax with paired Wilcoxon rank-sum test. 
+Test_tmax <- wilcox.test(ncaOutput$Tmax, ncaOutput$IND, paired = TRUE)
+
+```
+
+## Section IV: Plotting individual spaghettiplots for Figure 2
+
+```{r}
+# Recode the induction variable from numeric to categorical.
+Data_fig2 <- ncaOutput
+Data_fig2$IND <- factor(ncaOutput$IND, levels= c("0", "1"), labels=c("No inducer", "Inducer"))
+
+# Change the unit of Cl_obs from ml/h to l/h, to increase readability of the coming Table 2. 
+Data_fig2$Cl_obs <- (Data_fig2$Cl_obs)/1000
+
+# Create a spaghettiplot for the individual clearances. 
+ggplot(data = Data_fig2, aes(x = IND, y = Cl_obs)) +
+  geom_point(size=1) +
+  geom_line(aes(group = ID), size=0.5) + 
+  theme_classic() +
+  labs(x = "", y = expression(Midazolam~CL/F~(l~h^-1))) +
+  scale_y_continuous(position = "left", breaks = scales ::pretty_breaks(n=4)) +
+  guides(color=none) +
+  theme(text=element_text(family="Times"))
+```
+
+
+## Section V: Concentration-time curve for individual data points
+
+```{r}
+# Recode ID from numeric to categorical.
+rawpk$ID <- factor(rawpk$ID)
+
+# Recode IND from numeric to character.
+rawpk$IND <- recode(rawpk$IND, "0" = "No inducer", "1" = "Inducer")
+
+# Plot midazolam plasma concentrations and time for the individual subjects. 
+rawpk %>%
+  ggplot() +
+  geom_point(aes(x = TAD, y = DV, color = ID, shape = IND)) +
+  geom_line(aes(x = TAD, y = DV, group=interaction(ID, IND), color = ID, linetype = IND)) +
+  labs(
+    x ="Time after dose (h)", 
+    y = "Concentration (ng/ml)", 
+    title ="Midazolam plasma concentration", 
+    color = ""
+  ) +
+  theme_classic() +
+  theme(
+    plot.title = element_text(hjust = 0.5), 
+    legend.position = "bottom", 
+    legend.title = element_blank(), 
+    text=element_text(family="Times")
+  )
+
+# Individual plots of midazolam plasma concentration and time.
+ggplot(data = rawpk, aes(x = TAD, y = DV, color =IND)) +
+  geom_point() +
+  facet_wrap(~ID) +
+  scale_y_log10() +
+  labs(
+    x ="Time after dose (h)", 
+    y = "Concentration (ng/ml)", 
+    title ="Midazolam plasma concentration (log-transformed)"
+  ) + 
+  theme(axis.text.x = element_text(angle = 90), text=element_text(family="Times"))
+
+```
+
+
+## Section VI: Paired t-testing
+
+```{r}
+# Calculate mean AUC_last +/- standard deviation (SD) for the two groups (no inducer/inducer).
+pk_analysis %>% 
+  group_by(IND) %>% 
+  summarise(mean(AUClast), SD = sd(AUClast))
+
+# Q-Q plot to check for normality. 
+ggqqplot(pk_analysis$AUClast)
+
+# If normality is not satisfied, log-transform the AUC_last values.
+pk_analysis$logAUClast = log(pk_analysis$AUClast)
+
+# Compute the paired t-test for AUC_last.
+t.test(pk_analysis$AUClast, pk_analysis$IND, paired = TRUE)
+```
+
+
+## Section VII: Sample size calculation
+
+```{r}
+# SD_pooled = sqrt((SD_1^2 + SD_2^2)/2) = sqrt((1.12^2 + 1.09^2)⁄2)) = 1.11
+# Cohen's d = (mean_2-mean_1)/SD_pooled = (4.47 - 6.33)/1.11 = -1.68
+pwr.t.test(
+  n= NULL, d=-1.68, sig.level = 0.05, power =0.80, type = c("paired"), alt = c("two.sided") 
+  )        
+
+```
+
